@@ -181,4 +181,4 @@ wandb/
 
 # Distributed leaning
 hostfile.txt
-.deepspeed_env
+.deepspeed_env__pycache__/
