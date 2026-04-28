@@ -1,5 +1,6 @@
 import os
 import fnmatch
+import json
 
 import h5py
 import yaml
@@ -153,20 +154,8 @@ class HDF5VLADataset:
             # We randomly sample a timestep
             step_id = np.random.randint(first_idx-1, num_steps)
             
-            # Load instruction (prefer embedded in hdf5; fallback to nearby files)
-            instruction = ""
-            if 'instruction' in f:
-                val = f['instruction'][()]
-                instruction = val.decode('utf-8') if isinstance(val, (bytes, np.bytes_)) else str(val)
-            else:
-                dir_path = os.path.dirname(file_path)
-                txt_path = os.path.join(dir_path, "instruction.txt")
-                if os.path.isfile(txt_path):
-                    with open(txt_path, "r", encoding="utf-8") as fp:
-                        instruction = fp.read().strip()
-                else:
-                    # Last resort: keep empty instruction for robustness.
-                    instruction = ""
+            # Load instruction: HDF5 > official expanded instruction json > nearby text.
+            instruction = self._load_instruction(f, file_path)
             
             # Assemble the meta
             meta = {
@@ -271,16 +260,7 @@ class HDF5VLADataset:
                     imgs = []
                     for i in range(max(step_id-self.IMG_HISORY_SIZE+1, 0), step_id+1):
                         img = f['observations']['images'][key][i]
-                        # Support two formats:
-                        # 1) encoded bytes (original agilex example), decode by cv2.imdecode
-                        # 2) raw uint8 HWC arrays (our conversion pipeline)
-                        if isinstance(img, np.ndarray) and img.ndim == 3 and img.shape[-1] == 3:
-                            decoded = img.astype(np.uint8, copy=False)
-                        else:
-                            decoded = cv2.imdecode(np.frombuffer(img, np.uint8), cv2.IMREAD_COLOR)
-                            if decoded is None:
-                                raise ValueError(f"Failed to decode image in {file_path}, key={key}, step={i}")
-                            decoded = cv2.cvtColor(decoded, cv2.COLOR_BGR2RGB)
+                        decoded = self._decode_image(img, file_path=file_path, key=key, step=i)
                         imgs.append(decoded)
                     imgs = np.stack(imgs)
                     if imgs.shape[0] < self.IMG_HISORY_SIZE:
@@ -325,6 +305,59 @@ class HDF5VLADataset:
                 "cam_right_wrist": cam_right_wrist,
                 "cam_right_wrist_mask": cam_right_wrist_mask
             }
+
+    @staticmethod
+    def _decode_hdf5_string(value):
+        if isinstance(value, (bytes, np.bytes_)):
+            return value.decode('utf-8')
+        if isinstance(value, np.ndarray) and value.shape == ():
+            scalar = value.item()
+            if isinstance(scalar, (bytes, np.bytes_)):
+                return scalar.decode('utf-8')
+            return str(scalar)
+        return str(value)
+
+    def _load_instruction(self, hdf5_file, file_path: str) -> str:
+        if 'instruction' in hdf5_file:
+            return self._decode_hdf5_string(hdf5_file['instruction'][()]).strip()
+
+        dir_path = os.path.dirname(file_path)
+        json_path = os.path.join(dir_path, "expanded_instruction_gpt-4-turbo.json")
+        if os.path.isfile(json_path):
+            try:
+                with open(json_path, "r", encoding="utf-8") as fp:
+                    data = json.load(fp)
+                if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict):
+                    ins = data[0].get("instruction", "")
+                    if ins:
+                        return str(ins).strip()
+            except Exception:
+                pass
+
+        txt_path = os.path.join(dir_path, "instruction.txt")
+        if os.path.isfile(txt_path):
+            with open(txt_path, "r", encoding="utf-8") as fp:
+                return fp.read().strip()
+        return ""
+
+    @staticmethod
+    def _decode_image(img, file_path: str, key: str, step: int):
+        # Support raw RGB uint8 arrays in HDF5 directly.
+        if isinstance(img, np.ndarray) and img.ndim == 3 and img.shape[-1] == 3:
+            return img.astype(np.uint8, copy=False)
+
+        # Support encoded bytes/object datasets (e.g., JPEG/PNG).
+        if isinstance(img, np.ndarray):
+            buffer = img.tobytes()
+        elif isinstance(img, (bytes, np.bytes_, np.void)):
+            buffer = bytes(img)
+        else:
+            buffer = np.asarray(img).tobytes()
+
+        decoded = cv2.imdecode(np.frombuffer(buffer, np.uint8), cv2.IMREAD_COLOR)
+        if decoded is None:
+            raise ValueError(f"Failed to decode image in {file_path}, key={key}, step={step}")
+        return cv2.cvtColor(decoded, cv2.COLOR_BGR2RGB)
 
     def parse_hdf5_file_state_only(self, file_path):
         """[Modify] Parse a hdf5 file to generate a state trajectory.
