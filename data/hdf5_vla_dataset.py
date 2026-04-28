@@ -271,7 +271,17 @@ class HDF5VLADataset:
                     imgs = []
                     for i in range(max(step_id-self.IMG_HISORY_SIZE+1, 0), step_id+1):
                         img = f['observations']['images'][key][i]
-                        imgs.append(cv2.imdecode(np.frombuffer(img, np.uint8), cv2.IMREAD_COLOR))
+                        # Support two formats:
+                        # 1) encoded bytes (original agilex example), decode by cv2.imdecode
+                        # 2) raw uint8 HWC arrays (our conversion pipeline)
+                        if isinstance(img, np.ndarray) and img.ndim == 3 and img.shape[-1] == 3:
+                            decoded = img.astype(np.uint8, copy=False)
+                        else:
+                            decoded = cv2.imdecode(np.frombuffer(img, np.uint8), cv2.IMREAD_COLOR)
+                            if decoded is None:
+                                raise ValueError(f"Failed to decode image in {file_path}, key={key}, step={i}")
+                            decoded = cv2.cvtColor(decoded, cv2.COLOR_BGR2RGB)
+                        imgs.append(decoded)
                     imgs = np.stack(imgs)
                     if imgs.shape[0] < self.IMG_HISORY_SIZE:
                         imgs = np.concatenate([
