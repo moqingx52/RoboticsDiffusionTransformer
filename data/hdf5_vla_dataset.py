@@ -198,15 +198,9 @@ class HDF5VLADataset:
             if num_steps < 16:
                 return False, None
             
-            # [Optional] We skip the first few still steps
-            EPS = 1e-2
-            # Get the idx of the first qpos whose delta exceeds the threshold
-            qpos_delta = np.abs(qpos - qpos[0:1])
-            indices = np.where(np.any(qpos_delta > EPS, axis=1))[0]
-            first_idx = int(indices[0]) if len(indices) > 0 else 1
-            
-            # We randomly sample a timestep
-            step_id = np.random.randint(max(first_idx - 1, 0), num_steps)
+            # Keep the still prefix; sample from the full trajectory.
+            first_idx = 0
+            step_id = np.random.randint(0, num_steps)
             
             # Load instruction: HDF5 > official expanded instruction json > nearby text.
             instruction = self._load_instruction(f, file_path)
@@ -264,7 +258,7 @@ class HDF5VLADataset:
                         ], axis=0)
                     return imgs
                 cam_high = parse_img('cam_high')
-                start_idx = max(first_idx - 1, 0)
+                start_idx = 0
                 valid_len = min(step_id - start_idx + 1, self.IMG_HISORY_SIZE)
                 cam_high_mask = np.array(
                     [False] * (self.IMG_HISORY_SIZE - valid_len) + [True] * valid_len
@@ -382,13 +376,6 @@ class HDF5VLADataset:
             if num_steps < 16:
                 return False, None
             
-            # [Optional] We skip the first few still steps
-            EPS = 1e-2
-            # Get the idx of the first qpos whose delta exceeds the threshold
-            qpos_delta = np.abs(qpos - qpos[0:1])
-            indices = np.where(np.any(qpos_delta > EPS, axis=1))[0]
-            first_idx = int(indices[0]) if len(indices) > 0 else 1
-            
             if 'action' in f:
                 target_qpos = f['action'][:]
             else:
@@ -398,7 +385,7 @@ class HDF5VLADataset:
             target_qpos = target_qpos.astype(np.float32, copy=False)
             
             # Parse the state and action
-            start_idx = max(first_idx - 1, 0)
+            start_idx = 0
             state = self._fill_state_26(qpos_raw[start_idx:])
             action = self._fill_state_26(target_qpos[start_idx:])
             
