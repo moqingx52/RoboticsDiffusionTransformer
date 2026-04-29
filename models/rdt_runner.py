@@ -180,6 +180,12 @@ class RDTRunner(
         batch_size = lang_tokens.shape[0]
         device = lang_tokens.device  
 
+        # Expand once and use the same mask everywhere in training.
+        # This guarantees masked action dimensions do not affect either
+        # activations (via noisy_action) or loss values.
+        action_mask_h = action_mask.expand(-1, action_gt.shape[1], -1)
+        action_gt = action_gt * action_mask_h
+
         # Sample noise that we'll add to the actions
         noise = torch.randn(
             action_gt.shape, dtype=action_gt.dtype, device=device
@@ -197,8 +203,8 @@ class RDTRunner(
         # Concatenate the state and action tokens to form the input sequence
         state_action_traj = torch.cat([state_tokens, noisy_action], dim=1)
         # Append the action mask to the input sequence
-        action_mask = action_mask.expand(-1, state_action_traj.shape[1], -1)
-        state_action_traj = torch.cat([state_action_traj, action_mask], dim=2)
+        action_mask_traj = action_mask.expand(-1, state_action_traj.shape[1], -1)
+        state_action_traj = torch.cat([state_action_traj, action_mask_traj], dim=2)
         # Align the dimension with the hidden size
         lang_cond, img_cond, state_action_traj = self.adapt_conditions(
             lang_tokens, img_tokens, state_action_traj)
@@ -215,7 +221,9 @@ class RDTRunner(
         else:
             raise ValueError(f"Unsupported prediction type {pred_type}")
 
-        loss = F.mse_loss(pred, target)
+        per_elem_loss = F.mse_loss(pred, target, reduction='none') * action_mask_h
+        denom = action_mask_h.sum().clamp_min(1.0)
+        loss = per_elem_loss.sum() / denom
         return loss
     
     # ========= Inference  ============

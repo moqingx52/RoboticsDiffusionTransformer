@@ -27,6 +27,15 @@ USED_STATE_INDICES = (
     + [RIGHT_HAND_AUX]
 )
 
+RAW26_TO_UNIFIED = (
+    LEFT_ARM
+    + RIGHT_ARM
+    + LEFT_HAND_5
+    + [LEFT_HAND_AUX]
+    + RIGHT_HAND_5
+    + [RIGHT_HAND_AUX]
+)
+
 
 class HDF5VLADataset:
     """
@@ -47,6 +56,17 @@ class HDF5VLADataset:
             HDF5_DIR = "data/datasets/my_cool_dataset/rdt_data/"
         self.HDF5_DIR = HDF5_DIR
         self.DATASET_NAME = os.environ.get("RDT_DATASET_NAME", "my_cool_dataset")
+        self.mask_raw26_dims = self._parse_mask_raw26_dims(
+            os.environ.get("RDT_MASK_RAW26_DIMS", "")
+        )
+        self.mask_unified_indices = sorted(
+            {RAW26_TO_UNIFIED[i] for i in self.mask_raw26_dims}
+        )
+        if len(self.mask_raw26_dims) > 0:
+            print(
+                "[HDF5VLADataset] Masking raw26 dims"
+                f" {self.mask_raw26_dims} -> unified indices {self.mask_unified_indices}"
+            )
         
         self.file_paths = []
         for root, _, files in os.walk(self.HDF5_DIR):
@@ -107,6 +127,49 @@ class HDF5VLADataset:
                 return sample
             else:
                 index = np.random.randint(0, len(self.file_paths))
+
+    @staticmethod
+    def _parse_mask_raw26_dims(spec: str):
+        """
+        Parse `RDT_MASK_RAW26_DIMS`, e.g.
+        - "14,15,16"
+        - "14-25"
+        - "14-19,22,24-25"
+        """
+        spec = (spec or "").strip()
+        if not spec:
+            return []
+        dims = set()
+        for part in spec.split(","):
+            token = part.strip()
+            if not token:
+                continue
+            if "-" in token:
+                start, end = token.split("-", 1)
+                start_i = int(start.strip())
+                end_i = int(end.strip())
+                if end_i < start_i:
+                    start_i, end_i = end_i, start_i
+                for i in range(start_i, end_i + 1):
+                    dims.add(i)
+            else:
+                dims.add(int(token))
+        invalid = [i for i in dims if i < 0 or i >= 26]
+        if invalid:
+            raise ValueError(
+                f"RDT_MASK_RAW26_DIMS contains invalid dims {sorted(invalid)}; valid range is [0, 25]."
+            )
+        return sorted(dims)
+
+    def _mask_raw26(self, values: np.ndarray) -> np.ndarray:
+        values = np.asarray(values, dtype=np.float32)
+        if values.shape[-1] != 26:
+            raise ValueError(f"Expected last dim=26, got {values.shape}")
+        if len(self.mask_raw26_dims) == 0:
+            return values
+        masked = values.copy()
+        masked[..., self.mask_raw26_dims] = 0.0
+        return masked
 
     def _fill_state_26(self, values: np.ndarray) -> np.ndarray:
         """
@@ -213,14 +276,14 @@ class HDF5VLADataset:
                 "instruction": instruction
             }
             
-            qpos_raw = qpos.astype(np.float32, copy=False)
+            qpos_raw = self._mask_raw26(qpos.astype(np.float32, copy=False))
 
             # Read action.
             if 'action' in f:
                 raw_action = f['action'][:]
             else:
                 raw_action = f['actions'][:]
-            action_raw = raw_action.astype(np.float32, copy=False)
+            action_raw = self._mask_raw26(raw_action.astype(np.float32, copy=False))
             action_chunk_raw = action_raw[step_id:step_id + self.CHUNK_SIZE]
             
             # Parse the state and action
@@ -238,6 +301,8 @@ class HDF5VLADataset:
 
             state_indicator = np.zeros((self.STATE_DIM,), dtype=np.float32)
             state_indicator[USED_STATE_INDICES] = 1.0
+            if len(self.mask_unified_indices) > 0:
+                state_indicator[self.mask_unified_indices] = 0.0
             
             # Parse the images
             # This demo dataset may not contain any images; return empty arrays so
@@ -381,8 +446,8 @@ class HDF5VLADataset:
             else:
                 target_qpos = f['actions'][:]
 
-            qpos_raw = qpos.astype(np.float32, copy=False)
-            target_qpos = target_qpos.astype(np.float32, copy=False)
+            qpos_raw = self._mask_raw26(qpos.astype(np.float32, copy=False))
+            target_qpos = self._mask_raw26(target_qpos.astype(np.float32, copy=False))
             
             # Parse the state and action
             start_idx = 0

@@ -10,6 +10,9 @@ export VISION_ENCODER_NAME="/workspace/google/siglip-so400m-patch14-384"
 export PRETRAINED_RDT="/workspace/pretrained/rdt-170m"
 export OUTPUT_DIR="$SCRIPT_DIR/checkpoints/rdt-170m-my-cool-dataset-smoke"
 export NUM_GPUS="${NUM_GPUS:-8}"
+# Mask invalid right-hand-related raw action/state dims for this dataset.
+# Override if needed, e.g. RDT_MASK_RAW26_DIMS="" ./finetune_...
+export RDT_MASK_RAW26_DIMS="${RDT_MASK_RAW26_DIMS:-14-25}"
 
 # Use all 8 GPUs by default unless user already specifies CUDA_VISIBLE_DEVICES.
 if [[ -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
