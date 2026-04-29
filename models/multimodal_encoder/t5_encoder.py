@@ -1,3 +1,4 @@
+import os
 import torch
 from transformers import AutoTokenizer, T5EncoderModel
 
@@ -70,7 +71,7 @@ class T5Embedder:
         self.use_text_preprocessing = use_text_preprocessing
         self.hf_token = hf_token
 
-        assert from_pretrained in self.available_models
+        assert from_pretrained in self.available_models or os.path.isdir(from_pretrained)
         self.tokenizer = AutoTokenizer.from_pretrained(
             from_pretrained,
             model_max_length=model_max_length,
