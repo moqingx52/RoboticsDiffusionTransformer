@@ -37,9 +37,11 @@ def _maybe_write_instruction_json(out_hdf5_path: Path, instruction: str, use_tas
     json_path = task_dir / "expanded_instruction_gpt-4-turbo.json"
     if json_path.exists():
         return
-    data = [{
-        "instruction": instruction
-    }]
+    data = {
+        "instruction": instruction,
+        "simplified_instruction": instruction,
+        "expanded_instruction": [instruction]
+    }
     json_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 

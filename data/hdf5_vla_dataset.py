@@ -9,6 +9,24 @@ import numpy as np
 
 from configs.state_vec import STATE_VEC_IDX_MAPPING
 
+LEFT_ARM = [STATE_VEC_IDX_MAPPING[f"left_arm_joint_{i}_pos"] for i in range(7)]
+RIGHT_ARM = [STATE_VEC_IDX_MAPPING[f"right_arm_joint_{i}_pos"] for i in range(7)]
+
+LEFT_HAND_5 = [STATE_VEC_IDX_MAPPING[f"left_gripper_joint_{i}_pos"] for i in range(5)]
+RIGHT_HAND_5 = [STATE_VEC_IDX_MAPPING[f"right_gripper_joint_{i}_pos"] for i in range(5)]
+
+LEFT_HAND_AUX = STATE_VEC_IDX_MAPPING["left_arm_joint_7_pos"]
+RIGHT_HAND_AUX = STATE_VEC_IDX_MAPPING["right_arm_joint_7_pos"]
+
+USED_STATE_INDICES = (
+    LEFT_ARM
+    + RIGHT_ARM
+    + LEFT_HAND_5
+    + [LEFT_HAND_AUX]
+    + RIGHT_HAND_5
+    + [RIGHT_HAND_AUX]
+)
+
 
 class HDF5VLADataset:
     """
@@ -22,14 +40,13 @@ class HDF5VLADataset:
         # Priority:
         # 1) env `RDT_HDF5_DIR`
         # 2) default to a sibling `../traindata` (works for this demo repo layout)
-        # 3) fallback to original example path
+        # 3) fallback to the custom finetune dataset path
         default_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "traindata"))
         HDF5_DIR = os.environ.get("RDT_HDF5_DIR", default_dir)
         if not os.path.isdir(HDF5_DIR):
-            HDF5_DIR = "data/datasets/agilex/rdt_data/"
+            HDF5_DIR = "data/datasets/my_cool_dataset/rdt_data/"
         self.HDF5_DIR = HDF5_DIR
-        # Keep the default dataset name as `agilex` to reuse existing finetune configs.
-        self.DATASET_NAME = os.environ.get("RDT_DATASET_NAME", "agilex")
+        self.DATASET_NAME = os.environ.get("RDT_DATASET_NAME", "my_cool_dataset")
         
         self.file_paths = []
         for root, _, files in os.walk(self.HDF5_DIR):
@@ -90,6 +107,47 @@ class HDF5VLADataset:
                 return sample
             else:
                 index = np.random.randint(0, len(self.file_paths))
+
+    def _fill_state_26(self, values: np.ndarray) -> np.ndarray:
+        """
+        Map raw 26D vectors into unified state vectors.
+
+        Layout:
+          0:7   -> left arm joints (7)
+          7:14  -> right arm joints (7)
+          14:20 -> left hand/gripper (6), where the 6th dim goes to left arm slot 7
+          20:26 -> right hand/gripper (6), where the 6th dim goes to right arm slot 7
+        """
+        values = np.asarray(values, dtype=np.float32)
+        if values.shape[-1] != 26:
+            raise ValueError(f"Expected last dim=26, got {values.shape}")
+
+        out = np.zeros(values.shape[:-1] + (self.STATE_DIM,), dtype=np.float32)
+
+        out[..., LEFT_ARM] = values[..., 0:7]
+        out[..., RIGHT_ARM] = values[..., 7:14]
+        out[..., LEFT_HAND_5] = values[..., 14:19]
+        out[..., LEFT_HAND_AUX] = values[..., 19]
+        out[..., RIGHT_HAND_5] = values[..., 20:25]
+        out[..., RIGHT_HAND_AUX] = values[..., 25]
+        return out
+
+    def _rdt128_to_raw26(self, values: np.ndarray) -> np.ndarray:
+        """
+        Inverse mapping of _fill_state_26.
+        """
+        values = np.asarray(values, dtype=np.float32)
+        if values.shape[-1] != self.STATE_DIM:
+            raise ValueError(f"Expected last dim={self.STATE_DIM}, got {values.shape}")
+
+        out = np.zeros(values.shape[:-1] + (26,), dtype=np.float32)
+        out[..., 0:7] = values[..., LEFT_ARM]
+        out[..., 7:14] = values[..., RIGHT_ARM]
+        out[..., 14:19] = values[..., LEFT_HAND_5]
+        out[..., 19] = values[..., LEFT_HAND_AUX]
+        out[..., 20:25] = values[..., RIGHT_HAND_5]
+        out[..., 25] = values[..., RIGHT_HAND_AUX]
+        return out
     
     def parse_hdf5_file(self, file_path):
         """[Modify] Parse a hdf5 file to generate a training sample at
@@ -137,8 +195,7 @@ class HDF5VLADataset:
             else:
                 qpos = f['observations/qpos'][:]
             num_steps = qpos.shape[0]
-            # Drop too-short episode (align with config defaults; avoid over-filtering small demos)
-            if num_steps < 32:
+            if num_steps < 16:
                 return False, None
             
             # [Optional] We skip the first few still steps
@@ -152,7 +209,7 @@ class HDF5VLADataset:
                 raise ValueError("Found no qpos that exceeds the threshold.")
             
             # We randomly sample a timestep
-            step_id = np.random.randint(first_idx-1, num_steps)
+            step_id = np.random.randint(max(first_idx - 1, 0), num_steps)
             
             # Load instruction: HDF5 > official expanded instruction json > nearby text.
             instruction = self._load_instruction(f, file_path)
@@ -165,97 +222,35 @@ class HDF5VLADataset:
                 "instruction": instruction
             }
             
+            qpos_raw = qpos.astype(np.float32, copy=False)
+
             # Read action.
             if 'action' in f:
                 raw_action = f['action'][:]
             else:
                 raw_action = f['actions'][:]
-
-            # Our demo raw format is 26D:
-            #   left arm 7 | right arm 7 | left hand 6 | right hand 6
-            # For stability, we lightly rescale hand values to ~[0,1] (they can be large in raw logs).
-            def _rescale_hand(arr):
-                arr = arr.astype(np.float32, copy=False)
-                left_hand = arr[..., 14:20]
-                right_hand = arr[..., 20:26]
-                # If already small, keep; otherwise squash by a constant scale.
-                hand_scale = float(os.environ.get("RDT_HAND_SCALE", "2000.0"))
-                if np.nanmax(np.abs(left_hand)) > 10.0 or np.nanmax(np.abs(right_hand)) > 10.0:
-                    left_hand = np.clip(left_hand / hand_scale, 0.0, 1.0)
-                    right_hand = np.clip(right_hand / hand_scale, 0.0, 1.0)
-                    arr = arr.copy()
-                    arr[..., 14:20] = left_hand
-                    arr[..., 20:26] = right_hand
-                return arr
-
-            qpos = _rescale_hand(qpos)
-            raw_action = _rescale_hand(raw_action)
-            target_qpos = raw_action[step_id:step_id + self.CHUNK_SIZE]
+            action_raw = raw_action.astype(np.float32, copy=False)
+            action_chunk_raw = action_raw[step_id:step_id + self.CHUNK_SIZE]
             
             # Parse the state and action
-            state = qpos[step_id:step_id+1]
-            state_std = np.std(qpos, axis=0)
-            state_mean = np.mean(qpos, axis=0)
-            state_norm = np.sqrt(np.mean(qpos**2, axis=0))
-            actions = target_qpos
-            if actions.shape[0] < self.CHUNK_SIZE:
-                # Pad the actions using the last action
-                actions = np.concatenate([
-                    actions,
-                    np.tile(actions[-1:], (self.CHUNK_SIZE-actions.shape[0], 1))
-                ], axis=0)
-            
-            # Fill the state/action into the unified vector
-            def fill_in_demo26(values: np.ndarray) -> np.ndarray:
-                """
-                Map demo 26D vector to RDT unified 128D vector.
-                demo26 layout:
-                  [0:7]   left arm joints (7)
-                  [7:14]  right arm joints (7)
-                  [14:20] left hand (6)  -> left gripper joints (5) with a simple reduction
-                  [20:26] right hand (6) -> right gripper joints (5)
-                """
-                values = np.asarray(values, dtype=np.float32)
-                uni = np.zeros(values.shape[:-1] + (self.STATE_DIM,), dtype=np.float32)
+            state = self._fill_state_26(qpos_raw[step_id])
+            state_std = self._fill_state_26(np.std(qpos_raw, axis=0))
+            state_mean = self._fill_state_26(np.mean(qpos_raw, axis=0))
+            state_norm = self._fill_state_26(np.sqrt(np.mean(qpos_raw ** 2, axis=0)))
+            actions = self._fill_state_26(action_chunk_raw)
+            action_len = actions.shape[0]
+            if action_len < self.CHUNK_SIZE:
+                pad = np.zeros((self.CHUNK_SIZE - action_len, self.STATE_DIM), dtype=np.float32)
+                actions = np.concatenate([actions, pad], axis=0)
 
-                left_arm = values[..., 0:7]
-                right_arm = values[..., 7:14]
-                left_hand = values[..., 14:20]
-                right_hand = values[..., 20:26]
-
-                # Arms: fill first 7 joint slots (out of 10 reserved)
-                for i in range(7):
-                    uni[..., STATE_VEC_IDX_MAPPING[f"left_arm_joint_{i}_pos"]] = left_arm[..., i]
-                    uni[..., STATE_VEC_IDX_MAPPING[f"right_arm_joint_{i}_pos"]] = right_arm[..., i]
-
-                # Hands: we have 6 dims but only 5 gripper_joint slots reserved.
-                # We merge the last two dims by average to fit into 5.
-                def hand6_to_5(hand6):
-                    hand5 = np.zeros(hand6.shape[:-1] + (5,), dtype=np.float32)
-                    hand5[..., 0:4] = hand6[..., 0:4]
-                    hand5[..., 4] = 0.5 * (hand6[..., 4] + hand6[..., 5])
-                    return hand5
-
-                left_g = hand6_to_5(left_hand)
-                right_g = hand6_to_5(right_hand)
-                for i in range(5):
-                    uni[..., STATE_VEC_IDX_MAPPING[f"left_gripper_joint_{i}_pos"]] = left_g[..., i]
-                    uni[..., STATE_VEC_IDX_MAPPING[f"right_gripper_joint_{i}_pos"]] = right_g[..., i]
-
-                return uni
-
-            state = fill_in_demo26(state)
-            state_indicator = fill_in_demo26(np.ones_like(state_std, dtype=np.float32))
-            state_std = fill_in_demo26(state_std)
-            state_mean = fill_in_demo26(state_mean)
-            state_norm = fill_in_demo26(state_norm)
-            actions = fill_in_demo26(actions)
+            state_indicator = np.zeros((self.STATE_DIM,), dtype=np.float32)
+            state_indicator[USED_STATE_INDICES] = 1.0
             
             # Parse the images
             # This demo dataset may not contain any images; return empty arrays so
             # the training pipeline will replace them with background images.
             has_images = ('observations' in f) and ('images' in f['observations'])
-            if has_images:
+            if has_images and ('cam_high' in f['observations']['images']):
                 def parse_img(key):
                     imgs = []
                     for i in range(max(step_id-self.IMG_HISORY_SIZE+1, 0), step_id+1):
@@ -270,14 +265,15 @@ class HDF5VLADataset:
                         ], axis=0)
                     return imgs
                 cam_high = parse_img('cam_high')
-                valid_len = min(step_id - (first_idx - 1) + 1, self.IMG_HISORY_SIZE)
+                start_idx = max(first_idx - 1, 0)
+                valid_len = min(step_id - start_idx + 1, self.IMG_HISORY_SIZE)
                 cam_high_mask = np.array(
                     [False] * (self.IMG_HISORY_SIZE - valid_len) + [True] * valid_len
                 )
-                cam_left_wrist = parse_img('cam_left_wrist')
-                cam_left_wrist_mask = cam_high_mask.copy()
-                cam_right_wrist = parse_img('cam_right_wrist')
-                cam_right_wrist_mask = cam_high_mask.copy()
+                cam_left_wrist = np.zeros((self.IMG_HISORY_SIZE, 0, 0, 0), dtype=np.uint8)
+                cam_left_wrist_mask = np.zeros((self.IMG_HISORY_SIZE,), dtype=bool)
+                cam_right_wrist = np.zeros((self.IMG_HISORY_SIZE, 0, 0, 0), dtype=np.uint8)
+                cam_right_wrist_mask = np.zeros((self.IMG_HISORY_SIZE,), dtype=bool)
             else:
                 cam_high = np.zeros((self.IMG_HISORY_SIZE, 0, 0, 0), dtype=np.uint8)
                 cam_left_wrist = np.zeros((self.IMG_HISORY_SIZE, 0, 0, 0), dtype=np.uint8)
@@ -327,6 +323,10 @@ class HDF5VLADataset:
             try:
                 with open(json_path, "r", encoding="utf-8") as fp:
                     data = json.load(fp)
+                if isinstance(data, dict):
+                    ins = data.get("instruction", "")
+                    if ins:
+                        return str(ins).strip()
                 if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict):
                     ins = data[0].get("instruction", "")
                     if ins:
@@ -380,7 +380,7 @@ class HDF5VLADataset:
             else:
                 qpos = f['observations/qpos'][:]
             num_steps = qpos.shape[0]
-            if num_steps < 32:
+            if num_steps < 16:
                 return False, None
             
             # [Optional] We skip the first few still steps
@@ -398,50 +398,13 @@ class HDF5VLADataset:
             else:
                 target_qpos = f['actions'][:]
 
-            def _rescale_hand(arr):
-                arr = arr.astype(np.float32, copy=False)
-                left_hand = arr[..., 14:20]
-                right_hand = arr[..., 20:26]
-                hand_scale = float(os.environ.get("RDT_HAND_SCALE", "2000.0"))
-                if np.nanmax(np.abs(left_hand)) > 10.0 or np.nanmax(np.abs(right_hand)) > 10.0:
-                    left_hand = np.clip(left_hand / hand_scale, 0.0, 1.0)
-                    right_hand = np.clip(right_hand / hand_scale, 0.0, 1.0)
-                    arr = arr.copy()
-                    arr[..., 14:20] = left_hand
-                    arr[..., 20:26] = right_hand
-                return arr
-
-            qpos = _rescale_hand(qpos)
-            target_qpos = _rescale_hand(target_qpos)
+            qpos_raw = qpos.astype(np.float32, copy=False)
+            target_qpos = target_qpos.astype(np.float32, copy=False)
             
             # Parse the state and action
-            state = qpos[first_idx-1:]
-            action = target_qpos[first_idx-1:]
-            
-            # Fill the state/action into the unified vector
-            def fill_in_demo26(values: np.ndarray) -> np.ndarray:
-                values = np.asarray(values, dtype=np.float32)
-                uni = np.zeros(values.shape[:-1] + (self.STATE_DIM,), dtype=np.float32)
-                left_arm = values[..., 0:7]
-                right_arm = values[..., 7:14]
-                left_hand = values[..., 14:20]
-                right_hand = values[..., 20:26]
-                for i in range(7):
-                    uni[..., STATE_VEC_IDX_MAPPING[f"left_arm_joint_{i}_pos"]] = left_arm[..., i]
-                    uni[..., STATE_VEC_IDX_MAPPING[f"right_arm_joint_{i}_pos"]] = right_arm[..., i]
-                def hand6_to_5(hand6):
-                    hand5 = np.zeros(hand6.shape[:-1] + (5,), dtype=np.float32)
-                    hand5[..., 0:4] = hand6[..., 0:4]
-                    hand5[..., 4] = 0.5 * (hand6[..., 4] + hand6[..., 5])
-                    return hand5
-                left_g = hand6_to_5(left_hand)
-                right_g = hand6_to_5(right_hand)
-                for i in range(5):
-                    uni[..., STATE_VEC_IDX_MAPPING[f"left_gripper_joint_{i}_pos"]] = left_g[..., i]
-                    uni[..., STATE_VEC_IDX_MAPPING[f"right_gripper_joint_{i}_pos"]] = right_g[..., i]
-                return uni
-            state = fill_in_demo26(state)
-            action = fill_in_demo26(action)
+            start_idx = max(first_idx - 1, 0)
+            state = self._fill_state_26(qpos_raw[start_idx:])
+            action = self._fill_state_26(target_qpos[start_idx:])
             
             # Return the resulting sample
             return True, {
