@@ -203,10 +203,7 @@ class HDF5VLADataset:
             # Get the idx of the first qpos whose delta exceeds the threshold
             qpos_delta = np.abs(qpos - qpos[0:1])
             indices = np.where(np.any(qpos_delta > EPS, axis=1))[0]
-            if len(indices) > 0:
-                first_idx = indices[0]
-            else:
-                raise ValueError("Found no qpos that exceeds the threshold.")
+            first_idx = int(indices[0]) if len(indices) > 0 else 1
             
             # We randomly sample a timestep
             step_id = np.random.randint(max(first_idx - 1, 0), num_steps)
@@ -233,14 +230,16 @@ class HDF5VLADataset:
             action_chunk_raw = action_raw[step_id:step_id + self.CHUNK_SIZE]
             
             # Parse the state and action
-            state = self._fill_state_26(qpos_raw[step_id])
+            state = self._fill_state_26(qpos_raw[step_id:step_id + 1])
             state_std = self._fill_state_26(np.std(qpos_raw, axis=0))
             state_mean = self._fill_state_26(np.mean(qpos_raw, axis=0))
             state_norm = self._fill_state_26(np.sqrt(np.mean(qpos_raw ** 2, axis=0)))
             actions = self._fill_state_26(action_chunk_raw)
             action_len = actions.shape[0]
             if action_len < self.CHUNK_SIZE:
-                pad = np.zeros((self.CHUNK_SIZE - action_len, self.STATE_DIM), dtype=np.float32)
+                if action_len == 0:
+                    return False, None
+                pad = np.repeat(actions[-1:], self.CHUNK_SIZE - action_len, axis=0)
                 actions = np.concatenate([actions, pad], axis=0)
 
             state_indicator = np.zeros((self.STATE_DIM,), dtype=np.float32)
@@ -388,10 +387,7 @@ class HDF5VLADataset:
             # Get the idx of the first qpos whose delta exceeds the threshold
             qpos_delta = np.abs(qpos - qpos[0:1])
             indices = np.where(np.any(qpos_delta > EPS, axis=1))[0]
-            if len(indices) > 0:
-                first_idx = indices[0]
-            else:
-                raise ValueError("Found no qpos that exceeds the threshold.")
+            first_idx = int(indices[0]) if len(indices) > 0 else 1
             
             if 'action' in f:
                 target_qpos = f['action'][:]
