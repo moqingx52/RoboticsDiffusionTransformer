@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import csv
+import json
 import os
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
@@ -260,12 +261,79 @@ def resolve_checkpoint_path(path_str: str) -> str:
     raise FileNotFoundError(f"No .pt file found under checkpoint directory: {path}")
 
 
+def find_checkpoint_config_json(user_ckpt_arg: str, resolved_ckpt_file: str) -> Path | None:
+    candidates: List[Path] = []
+    raw_path = Path(user_ckpt_arg)
+    if raw_path.is_dir():
+        candidates.append(raw_path / "config.json")
+    elif raw_path.is_file():
+        candidates.append(raw_path.parent / "config.json")
+
+    resolved = Path(resolved_ckpt_file)
+    for p in [resolved.parent, resolved.parent.parent, resolved.parent.parent.parent]:
+        candidates.append(p / "config.json")
+
+    # Keep order, de-duplicate
+    seen = set()
+    unique_candidates = []
+    for c in candidates:
+        s = str(c)
+        if s not in seen:
+            seen.add(s)
+            unique_candidates.append(c)
+
+    for c in unique_candidates:
+        if c.is_file():
+            return c
+    return None
+
+
+def merge_training_model_config(runtime_cfg: dict, ckpt_cfg: dict) -> dict:
+    out = runtime_cfg
+
+    # Required core shape values for architecture compatibility.
+    if "rdt" in ckpt_cfg:
+        out["model"]["rdt"] = ckpt_cfg["rdt"]
+    for key in ["lang_adaptor", "img_adaptor", "state_adaptor", "lang_token_dim", "img_token_dim", "state_token_dim"]:
+        if key in ckpt_cfg:
+            out["model"][key] = ckpt_cfg[key]
+    if "noise_scheduler" in ckpt_cfg:
+        out["model"]["noise_scheduler"] = ckpt_cfg["noise_scheduler"]
+    if "ema" in ckpt_cfg:
+        out["model"]["ema"] = ckpt_cfg["ema"]
+
+    if "pred_horizon" in ckpt_cfg:
+        out["common"]["action_chunk_size"] = int(ckpt_cfg["pred_horizon"])
+    if "action_dim" in ckpt_cfg:
+        out["common"]["state_dim"] = int(ckpt_cfg["action_dim"])
+    if "max_lang_cond_len" in ckpt_cfg:
+        out["dataset"]["tokenizer_max_length"] = int(ckpt_cfg["max_lang_cond_len"])
+
+    # Optional: derive image history/camera count from training config.
+    image_cfg = None
+    for item in ckpt_cfg.get("img_pos_embed_config", []):
+        if isinstance(item, list) and len(item) == 2 and item[0] == "image":
+            image_cfg = item[1]
+            break
+    if isinstance(image_cfg, list) and len(image_cfg) >= 2:
+        out["common"]["img_history_size"] = int(image_cfg[0])
+        out["common"]["num_cameras"] = int(image_cfg[1])
+
+    return out
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--test_dir", type=str, default="/workspace/test")
     parser.add_argument("--output_dir", type=str, default="/workspace/sample_result_rdt")
     parser.add_argument("--config_path", type=str, default="configs/base.yaml")
     parser.add_argument("--pretrained_model_name_or_path", type=str, required=True)
+    parser.add_argument(
+        "--checkpoint_config_path",
+        type=str,
+        default=None,
+        help="Optional path to training-time config.json for architecture override (170M/1B compatibility).",
+    )
     parser.add_argument("--pretrained_vision_encoder_name_or_path", type=str, default="/workspace/google/siglip-so400m-patch14-384")
     parser.add_argument("--pretrained_text_encoder_name_or_path", type=str, default="/workspace/google/t5-v1_1-xxl")
     parser.add_argument("--ctrl_freq", type=int, default=25)
@@ -291,12 +359,31 @@ def main():
     if device.type == "cpu" and infer_dtype != torch.float32:
         infer_dtype = torch.float32
 
-    with open(args.config_path, "r", encoding="utf-8") as f:
-        config = yaml.safe_load(f)
-    state_dim = int(config["common"]["state_dim"])
-
     checkpoint_path = resolve_checkpoint_path(args.pretrained_model_name_or_path)
     print(f"Using checkpoint: {checkpoint_path}")
+
+    with open(args.config_path, "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+
+    ckpt_cfg_path = Path(args.checkpoint_config_path) if args.checkpoint_config_path else find_checkpoint_config_json(
+        args.pretrained_model_name_or_path, checkpoint_path
+    )
+    if ckpt_cfg_path is not None and ckpt_cfg_path.is_file():
+        with ckpt_cfg_path.open("r", encoding="utf-8") as f:
+            ckpt_cfg = json.load(f)
+        config = merge_training_model_config(config, ckpt_cfg)
+        print(f"Loaded checkpoint architecture config: {ckpt_cfg_path}")
+        print(
+            "Model structure => depth={depth}, hidden_size={hidden}, heads={heads}".format(
+                depth=config["model"]["rdt"]["depth"],
+                hidden=config["model"]["rdt"]["hidden_size"],
+                heads=config["model"]["rdt"]["num_heads"],
+            )
+        )
+    else:
+        print("[WARN] No checkpoint config.json found, using config_path only.")
+
+    state_dim = int(config["common"]["state_dim"])
 
     model = create_model(
         args=config,
