@@ -44,7 +44,14 @@ def main() -> None:
     parser.add_argument("--input_test_dir", type=str, required=True)
     parser.add_argument("--submission_dir", type=str, required=True)
     parser.add_argument("--predict_steps", type=int, default=50)
+    parser.add_argument(
+        "--action_steps",
+        type=int,
+        default=None,
+        help="Expected action/joint rows. Default is predict_steps + 1 (51 when predict_steps=50).",
+    )
     args = parser.parse_args()
+    action_steps = args.action_steps if args.action_steps is not None else (args.predict_steps + 1)
 
     test_dir = Path(args.input_test_dir)
     submission_dir = Path(args.submission_dir)
@@ -89,13 +96,16 @@ def main() -> None:
         if out_joint_header != in_joint_header:
             raise ValueError(f"{traj_name}: joint header mismatch")
 
-        validate_indices(out_action, out_action_rows, args.predict_steps)
-        validate_indices(out_joint, out_joint_rows, args.predict_steps)
+        validate_indices(out_action, out_action_rows, action_steps)
+        validate_indices(out_joint, out_joint_rows, action_steps)
 
         if normalize_instruction(out_instr) != normalize_instruction(test_instr):
             raise ValueError(f"{traj_name}: instruction text mismatch")
 
-    print(f"[OK] Format validation passed for {len(traj_dirs)} trajectories: {submission_dir}")
+    print(
+        f"[OK] Format validation passed for {len(traj_dirs)} trajectories: {submission_dir}. "
+        f"Checked action/joint rows={action_steps}, expected video frames={args.predict_steps}."
+    )
 
 
 if __name__ == "__main__":

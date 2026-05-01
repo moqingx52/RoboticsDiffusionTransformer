@@ -11,6 +11,7 @@ DTYPE="${DTYPE:-bf16}"
 DEVICE="${DEVICE:-cuda}"
 CTRL_FREQ="${CTRL_FREQ:-25}"
 PREDICT_STEPS="${PREDICT_STEPS:-50}"
+ACTION_STEPS="${ACTION_STEPS:-$((PREDICT_STEPS + 1))}"
 VIDEO_FPS="${VIDEO_FPS:-25}"
 TRAJ_NAME="${TRAJ_NAME:-}"
 
@@ -29,6 +30,8 @@ echo "[INFO] output_dir: ${OUTPUT_DIR}"
 echo "[INFO] ckpt_dir_or_file: ${CKPT_DIR}"
 echo "[INFO] vision_encoder: ${VISION_ENCODER_PATH}"
 echo "[INFO] text_encoder: ${TEXT_ENCODER_PATH}"
+echo "[INFO] predict_steps(video): ${PREDICT_STEPS}"
+echo "[INFO] action_steps(csv): ${ACTION_STEPS}"
 
 ARGS=(
   -m scripts.infer_minireal_submission
@@ -41,6 +44,7 @@ ARGS=(
   --device "${DEVICE}"
   --ctrl_freq "${CTRL_FREQ}"
   --predict_steps "${PREDICT_STEPS}"
+  --action_steps "${ACTION_STEPS}"
   --video_fps "${VIDEO_FPS}"
 )
 
@@ -54,6 +58,7 @@ python "${ARGS[@]}"
 python -m scripts.validate_submission_format \
   --input_test_dir "${TEST_DIR}" \
   --submission_dir "${OUTPUT_DIR}" \
-  --predict_steps "${PREDICT_STEPS}"
+  --predict_steps "${PREDICT_STEPS}" \
+  --action_steps "${ACTION_STEPS}"
 
 echo "[DONE] Inference + format validation completed."

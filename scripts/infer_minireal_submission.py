@@ -167,7 +167,7 @@ def encode_instruction(
 
 
 @torch.no_grad()
-def predict_actions_50(
+def predict_actions_chunk(
     model,
     text_embeds: torch.Tensor,
     state26: np.ndarray,
@@ -175,7 +175,7 @@ def predict_actions_50(
     frame_t: np.ndarray,
     ctrl_freq: int,
     state_dim: int,
-    predict_steps: int,
+    action_steps: int,
     device: torch.device,
     dtype: torch.dtype,
 ) -> np.ndarray:
@@ -206,7 +206,7 @@ def predict_actions_50(
 
     pred64_state128 = trajectory.cpu().numpy()[0]
     pred64_raw26 = rdt128_to_raw26(pred64_state128)
-    return pred64_raw26[:predict_steps]
+    return pred64_raw26[:action_steps]
 
 
 def pick_video_path(traj_dir: Path) -> Path | None:
@@ -339,6 +339,12 @@ def main():
     parser.add_argument("--ctrl_freq", type=int, default=25)
     parser.add_argument("--history_steps", type=int, default=16)
     parser.add_argument("--predict_steps", type=int, default=50)
+    parser.add_argument(
+        "--action_steps",
+        type=int,
+        default=None,
+        help="Number of action/joint rows to output. Default is predict_steps + 1 (51 when predict_steps=50).",
+    )
     parser.add_argument("--video_fps", type=int, default=25)
     parser.add_argument("--fallback_width", type=int, default=640)
     parser.add_argument("--fallback_height", type=int, default=480)
@@ -384,6 +390,14 @@ def main():
         print("[WARN] No checkpoint config.json found, using config_path only.")
 
     state_dim = int(config["common"]["state_dim"])
+    action_steps = args.action_steps if args.action_steps is not None else (args.predict_steps + 1)
+    pred_horizon = int(config["common"]["action_chunk_size"])
+    if action_steps > pred_horizon:
+        raise ValueError(
+            f"Requested action_steps={action_steps} exceeds model pred_horizon={pred_horizon}. "
+            f"Please reduce --action_steps."
+        )
+    print(f"Output format => action/joint rows: {action_steps}, video frames: {args.predict_steps}")
 
     model = create_model(
         args=config,
@@ -460,7 +474,7 @@ def main():
             cache=text_cache,
         )
         state26 = joint_data[args.history_steps - 1, 1:27].astype(np.float32, copy=False)
-        pred_action26 = predict_actions_50(
+        pred_action26 = predict_actions_chunk(
             model=model,
             text_embeds=text_embeds,
             state26=state26,
@@ -468,13 +482,13 @@ def main():
             frame_t=frame_t,
             ctrl_freq=args.ctrl_freq,
             state_dim=state_dim,
-            predict_steps=args.predict_steps,
+            action_steps=action_steps,
             device=device,
             dtype=infer_dtype,
         )
 
         start_idx = int(round(max(joint_data[:, 0].max(), action_data[:, 0].max()))) + 1
-        time_idx = np.arange(start_idx, start_idx + args.predict_steps, dtype=np.float32).reshape(-1, 1)
+        time_idx = np.arange(start_idx, start_idx + action_steps, dtype=np.float32).reshape(-1, 1)
         action_out = np.concatenate([time_idx, pred_action26], axis=1)
 
         # For this benchmark format, we output joint predictions aligned to the same 26D trajectory.
