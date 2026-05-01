@@ -5,8 +5,8 @@ REPO_DIR="/workspace/RoboticsDiffusionTransformer"
 TEST_DIR="/workspace/test"
 OUTPUT_DIR="/workspace/sample_result_rdt"
 CKPT_DIR="/workspace/RoboticsDiffusionTransformer/checkpoints/rdt-170m-my-cool-dataset-smoke/checkpoint-20000"
-VISION_ENCODER_PATH="./google/siglip-so400m-patch14-384"
-TEXT_ENCODER_PATH="./google/t5-v1_1-xxl"
+VISION_ENCODER_PATH="${VISION_ENCODER_PATH:-/workspace/google/siglip-so400m-patch14-384}"
+TEXT_ENCODER_PATH="${TEXT_ENCODER_PATH:-/workspace/google/t5-v1_1-xxl}"
 DTYPE="${DTYPE:-bf16}"
 DEVICE="${DEVICE:-cuda}"
 CTRL_FREQ="${CTRL_FREQ:-25}"
@@ -16,10 +16,19 @@ TRAJ_NAME="${TRAJ_NAME:-}"
 
 cd "${REPO_DIR}"
 
+if [[ ! -d "${VISION_ENCODER_PATH}" && -d "${REPO_DIR}/google/siglip-so400m-patch14-384" ]]; then
+  VISION_ENCODER_PATH="${REPO_DIR}/google/siglip-so400m-patch14-384"
+fi
+if [[ ! -d "${TEXT_ENCODER_PATH}" && -d "${REPO_DIR}/google/t5-v1_1-xxl" ]]; then
+  TEXT_ENCODER_PATH="${REPO_DIR}/google/t5-v1_1-xxl"
+fi
+
 echo "[INFO] repo: ${REPO_DIR}"
 echo "[INFO] test_dir: ${TEST_DIR}"
 echo "[INFO] output_dir: ${OUTPUT_DIR}"
 echo "[INFO] ckpt_dir_or_file: ${CKPT_DIR}"
+echo "[INFO] vision_encoder: ${VISION_ENCODER_PATH}"
+echo "[INFO] text_encoder: ${TEXT_ENCODER_PATH}"
 
 ARGS=(
   -m scripts.infer_minireal_submission
