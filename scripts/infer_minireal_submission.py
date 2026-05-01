@@ -220,10 +220,50 @@ def pick_video_path(traj_dir: Path) -> Path | None:
     return None
 
 
+def pick_instruction_path(traj_dir: Path) -> Path | None:
+    candidates = [
+        traj_dir / "instruction.txt",
+        traj_dir / "instructions.txt",
+    ]
+    for c in candidates:
+        if c.is_file():
+            return c
+    return None
+
+
+def resolve_checkpoint_path(path_str: str) -> str:
+    path = Path(path_str)
+    if path.is_file():
+        return str(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Checkpoint path does not exist: {path}")
+    if not path.is_dir():
+        raise ValueError(f"Checkpoint path must be file or directory: {path}")
+
+    candidates = [
+        path / "pytorch_model" / "mp_rank_00_model_states.pt",
+        path / "mp_rank_00_model_states.pt",
+    ]
+    for c in candidates:
+        if c.is_file():
+            return str(c)
+
+    pt_files = sorted(path.glob("**/*.pt"))
+    if len(pt_files) == 1:
+        return str(pt_files[0])
+    if len(pt_files) > 1:
+        preview = ", ".join(str(p) for p in pt_files[:5])
+        raise ValueError(
+            f"Found multiple .pt files under {path}. Please pass an explicit file path. "
+            f"Examples: {preview}"
+        )
+    raise FileNotFoundError(f"No .pt file found under checkpoint directory: {path}")
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--test_dir", type=str, default="/depot/release/test")
-    parser.add_argument("--output_dir", type=str, default="/depot/release/sample_result_rdt")
+    parser.add_argument("--test_dir", type=str, default="/workspace/test")
+    parser.add_argument("--output_dir", type=str, default="/workspace/sample_result_rdt")
     parser.add_argument("--config_path", type=str, default="configs/base.yaml")
     parser.add_argument("--pretrained_model_name_or_path", type=str, required=True)
     parser.add_argument("--pretrained_vision_encoder_name_or_path", type=str, default="./google/siglip-so400m-patch14-384")
@@ -237,6 +277,12 @@ def main():
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--dtype", type=str, default="bf16", choices=["bf16", "fp16", "fp32"])
     parser.add_argument("--allow_missing_video", action="store_true")
+    parser.add_argument(
+        "--traj_name",
+        type=str,
+        default=None,
+        help="Optional trajectory folder name for single-sample smoke test, e.g. 1_1",
+    )
     args = parser.parse_args()
 
     device = torch.device(args.device if args.device != "cuda" or torch.cuda.is_available() else "cpu")
@@ -249,10 +295,13 @@ def main():
         config = yaml.safe_load(f)
     state_dim = int(config["common"]["state_dim"])
 
+    checkpoint_path = resolve_checkpoint_path(args.pretrained_model_name_or_path)
+    print(f"Using checkpoint: {checkpoint_path}")
+
     model = create_model(
         args=config,
         dtype=infer_dtype,
-        pretrained=args.pretrained_model_name_or_path,
+        pretrained=checkpoint_path,
         pretrained_vision_encoder_name_or_path=args.pretrained_vision_encoder_name_or_path,
         control_frequency=args.ctrl_freq,
     )
@@ -274,15 +323,25 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     traj_dirs = sorted([p for p in test_dir.iterdir() if p.is_dir()])
+    if args.traj_name is not None:
+        traj_dirs = [p for p in traj_dirs if p.name == args.traj_name]
+        if not traj_dirs:
+            raise FileNotFoundError(f"No trajectory named '{args.traj_name}' under {test_dir}")
+    if not traj_dirs:
+        raise FileNotFoundError(f"No trajectory directories found under {test_dir}")
     text_cache: Dict[str, torch.Tensor] = {}
 
     for idx, traj_dir in enumerate(traj_dirs, start=1):
         print(f"[{idx}/{len(traj_dirs)}] Processing {traj_dir.name}")
-        instruction_path = traj_dir / "instruction.txt"
+        instruction_path = pick_instruction_path(traj_dir)
         joint_path = traj_dir / "joint.txt"
         action_path = traj_dir / "action.txt"
-        if not (instruction_path.is_file() and joint_path.is_file() and action_path.is_file()):
-            raise FileNotFoundError(f"Missing required files under {traj_dir}")
+        if instruction_path is None:
+            raise FileNotFoundError(f"Missing instruction.txt or instructions.txt under {traj_dir}")
+        if not joint_path.is_file():
+            raise FileNotFoundError(f"Missing joint.txt under {traj_dir}")
+        if not action_path.is_file():
+            raise FileNotFoundError(f"Missing action.txt under {traj_dir}")
 
         instruction = instruction_path.read_text(encoding="utf-8").strip()
         joint_header, joint_data = read_csv_matrix(joint_path)
@@ -327,7 +386,7 @@ def main():
             dtype=infer_dtype,
         )
 
-        start_idx = int(round(joint_data[args.history_steps - 1, 0])) + 1
+        start_idx = int(round(max(joint_data[:, 0].max(), action_data[:, 0].max()))) + 1
         time_idx = np.arange(start_idx, start_idx + args.predict_steps, dtype=np.float32).reshape(-1, 1)
         action_out = np.concatenate([time_idx, pred_action26], axis=1)
 
